@@ -1,8 +1,12 @@
 {
-  "image": "ghcr.io/ludeeus/devcontainer/integration:stable",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
   "name": "Blueprint integration development",
-  "context": "..",
-  "appPort": ["9123:8123"],
+  "appPort": [
+    "9123:8123"
+  ],
   "postCreateCommand": "container install",
   "extensions": [
     "ms-python.python",
