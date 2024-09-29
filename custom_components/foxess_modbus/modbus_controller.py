@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any
 from typing import Iterable
 from typing import Iterator
+from typing import Sequence
 
 from homeassistant.components.logbook import async_log_entry
 from homeassistant.core import HomeAssistant
@@ -53,12 +54,22 @@ _UINT16_MAX = 65535
 _INVERTER_WRITE_DELAY_SECS = 5
 
 
+class RegisterHealth(Enum):
+    # The register is being successfully read
+    HEALTHY = 0
+    # The register was read as part of a block which failed
+    MAYBE_UNHEALTHY = 1
+    # The register was read individually, which failed
+    UNHEALTHY = 2
+
+
 @dataclass
 class RegisterValue:
     poll_type: RegisterPollType
     read_value: int | None = None
     written_value: int | None = None
     written_at: float | None = None  # From time.monotonic()
+    health: RegisterHealth = RegisterHealth.HEALTHY
 
 
 class ConnectionState(Enum):
@@ -251,9 +262,10 @@ class ModbusController(EntityController, UnloadController):
                 )
                 return
 
-            # List of (start address, [read values starting at that address])
-            read_values: list[tuple[int, list[int]]] = []
+            # List of (start address, [read values starting at that address | None if the read failed])
+            read_values: list[tuple[int, Sequence[int | None]]] = []
             exception: Exception | None = None
+            any_succeeded = False
             try:
                 read_ranges = self._create_read_ranges(
                     self._max_read, is_initial_connection=self._connection_state != ConnectionState.CONNECTED
@@ -266,24 +278,46 @@ class ModbusController(EntityController, UnloadController):
                         start_address,
                         num_reads,
                     )
-                    reads = await self._client.read_registers(
-                        start_address,
-                        num_reads,
-                        self._connection_type_profile.register_type,
-                        self._slave,
-                    )
-                    read_values.append((start_address, reads))
+                    try:
+                        reads = await self._client.read_registers(
+                            start_address,
+                            num_reads,
+                            self._connection_type_profile.register_type,
+                            self._slave,
+                        )
+                        read_values.append((start_address, reads))
+                        any_succeeded = True
+                        # All registers in the read must be
+                    except ModbusClientFailedError as ex:
+                        exception = ex
+                        _LOGGER.debug(
+                            "Modbus error when polling %s %s: %s",
+                            self._client,
+                            self._slave,
+                            ex.response,
+                        )
+                        read_values.append((start_address, [None] * num_reads))
 
                 # If we made it to here, then all reads succeeded. Write them to _data and notify the sensors.
                 # This avoids recording reads if poll failed partway through (ensuring that we don't record potentially
                 # inconsistent data)
                 changed_addresses = set()
-                for start_address, reads in read_values:
-                    for i, value in enumerate(reads):
+                for start_address, values in read_values:
+                    for i, value in enumerate(values):
                         address = start_address + i
                         # We might be reading a register we don't care about (for efficiency). Discard it if so
                         register_value = self._data.get(address)
                         if register_value is not None:
+                            if value is None:
+                                # If this was a 1-register read, then we know this register is bad, so mark it unhealtly
+                                # If it was a multiple-register read then any of the registers in the read might be
+                                # the bad one, so we'll mark them all as maybe unhealthy, and poll them invididually
+                                # next time
+                                register_value.health = (
+                                    RegisterHealth.UNHEALTHY if len(values) == 1 else RegisterHealth.MAYBE_UNHEALTHY
+                                )
+                            else:
+                                register_value.health = RegisterHealth.HEALTHY
                             register_value.read_value = value
                             changed_addresses.add(address)
 
@@ -296,22 +330,16 @@ class ModbusController(EntityController, UnloadController):
                 self._notify_update(changed_addresses)
             except ConnectionException as ex:
                 exception = ex
+                any_succeeded = False
                 _LOGGER.debug(
                     "Failed to connect to %s %s: %s",
                     self._client,
                     self._slave,
                     ex,
                 )
-            except ModbusClientFailedError as ex:
-                exception = ex
-                _LOGGER.debug(
-                    "Modbus error when polling %s %s: %s",
-                    self._client,
-                    self._slave,
-                    ex.response,
-                )
             except Exception as ex:
                 exception = ex
+                any_succeeded = False
                 _LOGGER.warning(
                     "General exception when polling %s %s: %s",
                     self._client,
@@ -409,8 +437,12 @@ class ModbusController(EntityController, UnloadController):
                 continue
 
             # This register must be read in a single individual read. Yield any ranges we've found so far,
-            # and yield just this register on its own
-            if self._connection_type_profile.is_individual_read(address):
+            # and yield just this register on its own.
+            # If the register's health isn't HEALTHY, then we need to read it on its own.
+            if (
+                self._connection_type_profile.is_individual_read(address)
+                or register_value.health != RegisterHealth.HEALTHY
+            ):
                 if start_address is not None:
                     yield (start_address, read_size)
                     start_address, read_size = None, 0
