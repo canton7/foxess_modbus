@@ -5,7 +5,7 @@
   "config_flow": true,
   "dependencies": ["energy", "integration", "logbook"],
   "documentation": "https://github.com/nathanmarlor/foxess_modbus",
-  "integration_type": "service",
+  "integration_type": "device",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/nathanmarlor/foxess_modbus/issues",
   "version": "0.0.0"

@@ -20,6 +20,7 @@ from slugify import slugify
 from .client.modbus_client import ModbusClient
 from .common.types import HassData
 from .common.types import HassDataEntry
+from .common.types import InverterModel
 from .const import ADAPTER_ID
 from .const import ADAPTER_WAS_MIGRATED
 from .const import CONFIG_SAVE_TIME
@@ -27,6 +28,7 @@ from .const import DOMAIN
 from .const import ENTITY_ID_PREFIX
 from .const import FRIENDLY_NAME
 from .const import HOST
+from .const import INVERTER_BASE
 from .const import INVERTER_CONN
 from .const import INVERTERS
 from .const import MAX_READ
@@ -245,6 +247,14 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
                 inverter[ENTITY_ID_PREFIX] = slugify(inverter[ENTITY_ID_PREFIX], separator="_").rstrip("_")
 
         version = 7
+
+    if version == 7:
+        # We added support for the H3 PRO v1.33. We don't want to automatically bump everyone who was on v1.22 onto
+        # v1.33
+        for inverter in data.get(INVERTERS, {}).values():
+            if inverter[INVERTER_BASE] == InverterModel.H3_PRO:
+                # TODO
+                pass
 
     _LOGGER.info("Migration from version %s to version %s successful", config_entry.version, version)
     hass.config_entries.async_update_entry(entry=config_entry, data=data, options=new_options, version=version)
